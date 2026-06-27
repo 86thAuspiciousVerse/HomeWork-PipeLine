@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Claude Code 本地配置（不进入版本控制）
+.claude/settings.local.json
+
+# 运行时产物（测试 /hw 时产生的）
+.homework/run_*/
+*.tmp
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
