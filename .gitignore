@@ -9,6 +9,7 @@ __pycache__/
 # 开发者文档（不参与运行时，不进入分发）
 CLAUDE.md
 DESIGN.md
+PLUGIN_FEEDBACK.md
 
 # 运行时产物（测试 /hw 时产生的）
 .homework/run_*/
