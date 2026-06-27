@@ -1,6 +1,6 @@
 {
   "name": "homework-pipeline",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "一键做作业——输入课程要求 docx/md，全自动产出可交付的数据科学课程设计作业（含代码、venv、产物、文档、执行留痕）",
   "author": {
     "name": "HomeWork-PipeLine"
