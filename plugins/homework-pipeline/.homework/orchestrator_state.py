@@ -667,6 +667,36 @@ def _cli_show(args: List[str]) -> int:
     return 0
 
 
+def _cli_mark_entering(args: List[str]) -> int:
+    """CLI: 把指定阶段推到 ENTERING 状态（幂等，COMPLETED 不动）。"""
+    if len(args) < 2:
+        print("用法: mark-entering <run_id> <phase>", file=sys.stderr)
+        return 2
+    run_id, phase = args[0], args[1]
+    state = _load_state(run_id)
+    state = mark_entering(state, phase)
+    print(json.dumps(_state_summary(state), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cli_get_run_info(args: List[str]) -> int:
+    """CLI: 查询 run_root / state_path 等关键路径，供主 agent 委托 subagent 时注入。"""
+    if not args:
+        print("用法: get-run-info <run_id>", file=sys.stderr)
+        return 2
+    state = _load_state(args[0])
+    info = {
+        "run_id": state.run_id,
+        "run_root": state.run_root,
+        "state_path": state.state_path,
+        "docx_path": state.docx_path,
+        "current_phase": state.current_phase,
+        "phase_status": state.phase_status,
+    }
+    print(json.dumps(info, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _state_summary(state: RunState) -> Dict[str, Any]:
     """冒烟友好的人类可读摘要。"""
     return {
@@ -703,16 +733,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not argv:
         print(
             "用法: python orchestrator_state.py "
-            "{create-run|classify-breakpoints|commit-phase|show} ...",
+            "{create-run|mark-entering|classify-breakpoints|commit-phase|show|get-run-info} ...",
             file=sys.stderr,
         )
         return 2
     cmd, rest = argv[0], argv[1:]
     dispatch = {
         "create-run": _cli_create_run,
+        "mark-entering": _cli_mark_entering,
         "classify-breakpoints": _cli_classify_breakpoints,
         "commit-phase": _cli_commit_phase,
         "show": _cli_show,
+        "get-run-info": _cli_get_run_info,
     }
     fn = dispatch.get(cmd)
     if fn is None:
