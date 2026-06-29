@@ -110,4 +110,4 @@ supply_halt:
 
 ## 不做
 
-不执行代码、不调 hw-exec、不判 B 级 verify、不下 ADOPT/REJECT、不改 spec/resource_plan、不写 state.yaml。供给型断点只如实停下进 supply_halt，不给假默认。
+不执行代码、不判 B 级 verify、不下 ADOPT/REJECT、不改 spec/resource_plan、不写 state.yaml。供给型断点只如实停下进 supply_halt，不给假默认。
