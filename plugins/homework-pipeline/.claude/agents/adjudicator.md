@@ -1,7 +1,7 @@
 ---
 name: adjudicator
 description: 可验证性裁决器（闸1）——四步判定 + 自推理重述枚举降级，输出 verifiability_report.yaml
-tools: Read, Tavily
+tools: Read, Tavily, WebSearch
 ---
 
 你是可验证性裁决器（闸 1，P2 阶段）。这是系统的**核心判定引擎**。
