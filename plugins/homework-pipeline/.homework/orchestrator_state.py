@@ -1,7 +1,7 @@
-"""orchestrator_state.py — HomeWork-PipeLine 确定性状态机外壳（层 A 基础设施）。
+"""orchestrator_state.py — HomeWork-PipeLine 确定性状态机外壳。
 
 本文件落地 DESIGN.md §11.5.1 的 state.yaml 全量结构 + 闸2 纯函数 + 阶段提交函数。
-设计要点（详见 DESIGN.md §11.5.1）：
+设计要点：
 - 9 阶段串行：P0 SPEC_EXTRACT → P1 RESOURCE_PLANNER → P2 ADJUDICATION →
   P3 SUPPLY_GATE → P4 PLAN_SELECTOR → P5 EXECUTOR → P6 AUDITOR →
   P7 FACTS_DERIVE → P8 PACKER → COMPLETED
@@ -9,12 +9,11 @@
 - 两类断点：sense_default_trade（出生 resolved=true，不停机） /
             supply_halt（出生 resolved=false，phase_status=PAUSED）
 - 纯函数 + pydantic，无 daemon。
-- 续跑单一真相源：state.yaml；执行器/Auditor 子状态为指针/内联子节点。
+- 续跑单一真相源：state.yaml。
 
-依赖：仅 Python 标准库 + pydantic（DESIGN.md §0 标注 plugin-venv 提供 pydantic）。
-YAML 读写优先用标准库之外的 yaml（PyYAML，运行环境同属 plugin-venv），缺失则退回
-JSON 落 .yaml（保持向后兼容，注释在本模块内写明）。
-"""
+依赖：仅 Python 标准库 + pydantic。YAML 优先 PyYAML，缺失退 JSON 落 .yaml。
+
+v2 simplified：executor/verifiers/ 与 hw-exec 已删除。验证由 LLM 在现场自写脚本完成。"""
 
 from __future__ import annotations
 
@@ -30,8 +29,6 @@ from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # YAML 读写层：优先 PyYAML，缺失则 fallback 到 JSON（仍以 .yaml 扩展名落盘）。
-# 设计取舍：PyYAML 是 plugin-venv 内依赖（与 pydantic 同环境），但本模块不能假设
-# 它一定在 import 路径上——故做能力探测，缺失时退化为 JSON 序列化以保冒烟可用。
 # ---------------------------------------------------------------------------
 
 try:  # pragma: no cover - import 探测，无副作用
@@ -195,7 +192,8 @@ class PhaseAttemptsBudget(BaseModel):
 
 
 class ExecutorBudget(BaseModel):
-    """P5 EXECUTOR：per_node 分 cold（冷启 1 次）/ fix（修码重跑 3 次）。"""
+    """P5 EXECUTOR：per_node 分 cold（冷启 1 次）/ fix（修码重跑 3 次）。
+    P5 已简化——hw-orchestrator (LLM) 自己跑+验证+修码，不再调 hw-exec。"""
 
     per_node: Dict[str, int] = Field(default_factory=lambda: {"cold": 1, "fix": 3})
 
@@ -256,7 +254,7 @@ class PhaseRecord(BaseModel):
     schema_pass: Optional[bool] = None   # SPEC_EXTRACT 专用：spec.yaml schema 自检
     attempt: Optional[int] = None
     budget_used: Optional[Dict[str, int]] = None  # ADJUDICATION 用：已消耗的分维度预算
-    substate_ref: Optional[str] = None   # EXECUTOR 子状态指针（execution/state.json）
+    substate_ref: Optional[str] = None   # EXECUTOR 子状态指针（v2 simplifed：无独立 executor/state.json）
     substate: Optional[Dict[str, Any]] = None  # AUDITOR 内联子状态（非独立文件）
 
 
@@ -341,13 +339,11 @@ def _make_run_dirs(run_root: Path) -> None:
 
 
 def _init_phases() -> RunPhases:
-    """各阶段初始化为 PENDING，EXECUTOR/AUDITOR 带默认子状态指针/内联。"""
+    """各阶段初始化为 PENDING，AUDITOR 带默认子状态内联。"""
     phases: RunPhases = {}
     for p in PHASES:
         rec = PhaseRecord(status="PENDING")
-        if p == "EXECUTOR":
-            rec.substate_ref = "execution/state.json"
-        elif p == "AUDITOR":
+        if p == "AUDITOR":
             rec.substate = {
                 "pre_flight_done": [],
                 "inline_done": {},
@@ -697,6 +693,20 @@ def _cli_get_run_info(args: List[str]) -> int:
     return 0
 
 
+def _cli_resolve_supply_halt(args: List[str]) -> int:
+    """CLI: 用户提供了某 supply_halt item 的真实值后调用，逐条 resolve。
+    用法: resolve-supply-halt <run_id> <item_id> <value_ref>
+    value_ref 形如 env:AMAP_API_KEY，不存明文。"""
+    if len(args) < 3:
+        print("用法: resolve-supply-halt <run_id> <item_id> <value_ref>", file=sys.stderr)
+        return 2
+    run_id, item_id, value_ref = args[0], args[1], args[2]
+    state = _load_state(run_id)
+    state = resolve_supply_halt(state, item_id, value_ref)
+    print(json.dumps(_state_summary(state), ensure_ascii=False, indent=2))
+    return 0
+
+
 def _state_summary(state: RunState) -> Dict[str, Any]:
     """冒烟友好的人类可读摘要。"""
     return {
@@ -733,7 +743,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not argv:
         print(
             "用法: python orchestrator_state.py "
-            "{create-run|mark-entering|classify-breakpoints|commit-phase|show|get-run-info} ...",
+            "{create-run|mark-entering|classify-breakpoints|commit-phase|resolve-supply-halt|show|get-run-info} ...",
             file=sys.stderr,
         )
         return 2
@@ -743,6 +753,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "mark-entering": _cli_mark_entering,
         "classify-breakpoints": _cli_classify_breakpoints,
         "commit-phase": _cli_commit_phase,
+        "resolve-supply-halt": _cli_resolve_supply_halt,
         "show": _cli_show,
         "get-run-info": _cli_get_run_info,
     }
