@@ -37,3 +37,9 @@ cd ~/my-homework/
 ```bash
 claude plugin update homework-pipeline@homework-dev
 ```
+
+## 开发
+
+```bash
+uv run python -m unittest tests.test_orchestrator_state_smoke -v
+```

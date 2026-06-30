@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.pyo
+.venv/
 
 # Claude Code 本地配置（不进入版本控制）
 .claude/settings.local.json
