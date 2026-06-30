@@ -64,9 +64,9 @@ python -m venv {run_root}/.venv
 5. **探针失败是正常的信息收集过程。** 读错误信息，调整搜索词，再搜一次，再试。这个循环最多 2 轮。
 
 ```bash
-# 示例：确认高德 API 可用
-curl -s "https://restapi.amap.com/v3/bus/linename?s=北京&rs=1&key=$AMAP_API_KEY" | head -c 500
-# 如果 403/参数错误 → Tavily 搜索"高德公交API 参数说明 v3"→ 修正参数 → 再试
+# 示例：确认外部 API 可用。URL、参数和环境变量名必须来自当前任务文档或官方文档。
+curl -s "$SERVICE_ENDPOINT?key=$SERVICE_API_KEY" | head -c 500
+# 如果 403/参数错误 → 搜索该服务的官方参数说明 → 修正参数 → 再试
 ```
 
 **如果探针测试发现外部依赖不可用（key 无效、URL 404、认证失败且无绕过路径）→ 转 supply_halt，不要继续写代码。**
@@ -91,10 +91,9 @@ set PYTHONIOENCODING=utf-8 && "{run_root}/.venv/Scripts/python.exe" "{run_root}/
 
 **根据验收标准，自己写验证脚本并跑。** 验证方法由你现场决定——你能跑的命令都是验证工具：
 
-- 验收标准说"产物至少 2000 行" → 写 `python -c "import pandas as pd; df=pd.read_parquet('output/x.parquet'); n=len(df); assert n>=2000, f'行数{n}<2000'; print(f'[PASS] {n} rows')"`
-- 验收标准说"requirements.txt 版本锁定" → 写 `python -c "..."` 或直接 grep/gawk 检查
-- 验收标准说"CMake 构建成功" → `cmake --build . && echo [PASS]`
-- 验收标准说"Docker 容器响应" → `curl localhost:8080/health && echo [PASS]`
+- 验收标准说"产物路径存在" → 写 `python -c "from pathlib import Path; p=Path('output/result.ext'); assert p.exists() and p.stat().st_size > 0; print('[PASS] artifact exists')"`
+- 验收标准说"命令必须成功" → 运行该命令并以 exit code、stdout/stderr 作为证据
+- 验收标准包含任务特有的数值、结构或内容要求 → 根据当前 acceptance 现场写一次性验证脚本，把脚本、命令和输出写入 trace；不要调用预装领域检查单
 
 #### f. 判结果
 

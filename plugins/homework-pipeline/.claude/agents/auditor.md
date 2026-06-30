@@ -46,7 +46,7 @@ tools: Read, Bash
 | B 级（软约束） | GREEN | 通过，记入清单 |
 | B 级（软约束） | YELLOW / RED | 记入清单 + 留 evidence。**不阻断主交付** |
 
-**A 级 RED 的处理**：A 级 fail 说明产物不满足不可妥协的硬约束（如数据量不足、缺失关键列、代码风格不合规）。你如实记录 evidence 和建议修复方向，交主 agent 裁决是否接受、要求回溯修改、或申请教师宽限。你不断管线——你产证据，主 agent 做判决。
+**A 级 RED 的处理**：A 级 fail 说明产物不满足不可妥协的硬约束（如产物缺失、命令失败、一次性验收脚本失败）。你如实记录 evidence 和建议修复方向，交主 agent 裁决是否接受、要求回溯修改、或申请教师宽限。你不断管线——你产证据，主 agent 做判决。
 
 ## B 级 LLM judge 预算（单 B 项总调用 ≤3）
 
@@ -63,19 +63,19 @@ tools: Read, Bash
 逐条约束记：
 
 ```yaml
-- id: DATA_VOLUME
+- id: REQUIRED_ARTIFACT_EXISTS
   tier: A
   status: green
-  evidence: "实测 etl.parquet 含 5230 行，满足 ≥2000"
+  evidence: "实测 output/result.ext 存在且非空"
   judge: single
   rationale: ...
-- id: CODE_STYLE
+- id: REQUIRED_COMMAND
   tier: A
   status: red
-  evidence: "3 个依赖未锁定版本: numpy, pandas, matplotlib"
+  evidence: "验收命令 exit code = 1"
   judge: single
   requires_fix: true
-  suggested_fix: "将 requirements.txt 中的 >= 改为 =="
+  suggested_fix: "查看 trace 中的 stdout/stderr，回到对应 node 修复"
 ```
 
 ### `artifacts/audit_report.md`
@@ -88,14 +88,14 @@ tools: Read, Bash
 ## 硬约束（A 级）
 | 约束 | 状态 | 证据 |
 |------|------|------|
-| DATA_VOLUME | ✅ 通过 | etl.parquet 5230 行 ≥ 2000 |
-| CODE_STYLE | ❌ 未过 | 3 个依赖未锁定版本 |
+| REQUIRED_ARTIFACT_EXISTS | ✅ 通过 | output/result.ext 存在且非空 |
+| REQUIRED_COMMAND | ❌ 未过 | 验收命令 exit code = 1 |
 
 ## 软约束（B 级）
 ...
 
 ## 阻断项
-- CODE_STYLE: 3 个依赖未锁定版本 → 建议修改 requirements.txt 后重新审计
+- REQUIRED_COMMAND: 验收命令失败 → 建议查看 trace 后修复对应 node 并重新审计
 ```
 
 ## 硬约束
