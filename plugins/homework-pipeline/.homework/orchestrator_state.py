@@ -256,6 +256,8 @@ class PhaseRecord(BaseModel):
     budget_used: Optional[Dict[str, int]] = None  # ADJUDICATION 用：已消耗的分维度预算
     substate_ref: Optional[str] = None   # EXECUTOR 子状态指针（v2 simplifed：无独立 executor/state.json）
     substate: Optional[Dict[str, Any]] = None  # AUDITOR 内联子状态（非独立文件）
+    # EXECUTOR 专用：手动补完的 node 记录
+    manual_nodes: Optional[List[Dict[str, str]]] = None  # [{node, source, resolved_at}]
 
 
 RunPhases = Dict[str, PhaseRecord]
@@ -611,6 +613,76 @@ def resolve_supply_halt(state: RunState, item_id: str, value_ref: str) -> RunSta
     return state
 
 
+# ---------------------------------------------------------------------------
+# 纯函数 5：add_supply_halt_item（P5/P6 产出的 supply_halt 增量追加）
+# ---------------------------------------------------------------------------
+
+
+def add_supply_halt_item(
+    state: RunState,
+    id: str,
+    stage_id: str,
+    kind: str,
+    trigger: TriggerKind,
+    why: str,
+    obtain_steps: List[str],
+    when_provided: str,
+) -> RunState:
+    """P5 执行器或 P6 auditor 发现新 supply_halt 时调用，追加写入 state.yaml。
+
+    与 P2→P3 自动写入不同，P5/P6 产出的 supply_halt 需要主 agent 显式调用此函数。
+    追加后 batch 非空 → phase_status=PAUSED，等用户补给。
+    """
+    item = SupplyHaltBatchItem(
+        id=id,
+        stage_id=stage_id,
+        trigger=trigger,
+        kind=kind,
+        why=why,
+        obtain_steps=obtain_steps,
+        when_provided=when_provided,
+        resolved=False,
+        supplied_items=[],
+    )
+    state.breakpoints.supply_halt.batch.append(item)
+    state.breakpoints.supply_halt.resolved = False
+    state.phase_status = "PAUSED"
+    state.auto_mode = "scaffold_with_breakpoints"
+    _persist(state)
+    return state
+
+
+# ---------------------------------------------------------------------------
+# 纯函数 6：manual_resolve_node（学生手动补完 P5 give_up 的 node）
+# ---------------------------------------------------------------------------
+
+
+def manual_resolve_node(
+    state: RunState,
+    node_name: str,
+    source_path: str,
+) -> RunState:
+    """学生手动完成了 P5 give_up 的 node 后调用，正式登记到 state.yaml。
+
+    写入 EXECUTOR 阶段的 manual_nodes 列表，标记 source: manual，
+    供 P7 facts-deriver 计算 AI 占比时扣除。
+    """
+    rec = state.phases.get("EXECUTOR")
+    if rec is None:
+        rec = PhaseRecord(status="PENDING")
+        state.phases["EXECUTOR"] = rec
+    if rec.manual_nodes is None:
+        rec.manual_nodes = []
+    now_iso = _dt.datetime.now().isoformat()
+    rec.manual_nodes.append({
+        "node": node_name,
+        "source": source_path,
+        "resolved_at": now_iso,
+    })
+    _persist(state)
+    return state
+
+
 def _next_pending_phase(state: RunState) -> str:
     """返回 phases 中第一个未 COMPLETED 的阶段；全完成返回 COMPLETED。"""
     for p in PHASES:
@@ -635,11 +707,24 @@ def _cli_create_run(args: List[str]) -> int:
 
 
 def _cli_classify_breakpoints(args: List[str]) -> int:
-    if not args:
-        print("用法: classify-breakpoints <verifiability_report.yaml>", file=sys.stderr)
+    """闸2 CLI：对 verifiability_report 做断点分类，并自动写入 state.yaml。
+    用法: classify-breakpoints <run_id> <verifiability_report.yaml>"""
+    if len(args) < 2:
+        print("用法: classify-breakpoints <run_id> <verifiability_report.yaml>", file=sys.stderr)
         return 2
-    result = classify_breakpoints(args[0])
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    run_id, report_path = args[0], args[1]
+    result = classify_breakpoints(report_path)
+    # 自动持久化到 state.yaml
+    state = _load_state(run_id)
+    state.breakpoints = Breakpoints(
+        sense_default_trade=SenseDefaultTrade(**result["sense_default_trade"]),
+        supply_halt=SupplyHalt(**result["supply_halt"]),
+    )
+    state.auto_mode = result["auto_mode"]
+    if result["phase_status"] == "PAUSED":
+        state.phase_status = "PAUSED"
+    _persist(state)
+    print(json.dumps(_state_summary(state), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -707,6 +792,49 @@ def _cli_resolve_supply_halt(args: List[str]) -> int:
     return 0
 
 
+def _cli_add_supply_halt(args: List[str]) -> int:
+    """CLI: P5/P6 产出的 supply_halt 增量追加到 state.yaml。
+    用法: add-supply-halt <run_id> <id> <stage_id> <trigger> <kind> <why_json>
+    因 why/obtain_steps/when_provided 可能含空格，通过 stdin JSON 传入。"""
+    if len(args) < 1:
+        print("用法: add-supply-halt <run_id> < item.json", file=sys.stderr)
+        print("  item.json: {id, stage_id, trigger, kind, why, obtain_steps, when_provided}", file=sys.stderr)
+        return 2
+    run_id = args[0]
+    raw = sys.stdin.read()
+    try:
+        item = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"JSON 解析失败: {e}", file=sys.stderr)
+        return 2
+    state = _load_state(run_id)
+    state = add_supply_halt_item(
+        state,
+        id=str(item["id"]),
+        stage_id=str(item.get("stage_id", "")),
+        kind=str(item.get("kind", "api_key")),
+        trigger=str(item.get("trigger", "executor")),  # type: ignore[arg-type]
+        why=str(item.get("why", "")),
+        obtain_steps=[str(s) for s in item.get("obtain_steps", [])],
+        when_provided=str(item.get("when_provided", "")),
+    )
+    print(json.dumps(_state_summary(state), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cli_manual_resolve_node(args: List[str]) -> int:
+    """CLI: 学生手动完成 P5 give_up 的 node 后正式登记。
+    用法: manual-resolve-node <run_id> <node_name> <source_path>"""
+    if len(args) < 3:
+        print("用法: manual-resolve-node <run_id> <node_name> <source_path>", file=sys.stderr)
+        return 2
+    run_id, node_name, source_path = args[0], args[1], args[2]
+    state = _load_state(run_id)
+    state = manual_resolve_node(state, node_name, source_path)
+    print(json.dumps(_state_summary(state), ensure_ascii=False, indent=2))
+    return 0
+
+
 def _state_summary(state: RunState) -> Dict[str, Any]:
     """冒烟友好的人类可读摘要。"""
     return {
@@ -743,7 +871,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not argv:
         print(
             "用法: python orchestrator_state.py "
-            "{create-run|mark-entering|classify-breakpoints|commit-phase|resolve-supply-halt|show|get-run-info} ...",
+            "{create-run|mark-entering|classify-breakpoints|commit-phase|resolve-supply-halt|add-supply-halt|manual-resolve-node|show|get-run-info} ...",
             file=sys.stderr,
         )
         return 2
@@ -754,6 +882,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "classify-breakpoints": _cli_classify_breakpoints,
         "commit-phase": _cli_commit_phase,
         "resolve-supply-halt": _cli_resolve_supply_halt,
+        "add-supply-halt": _cli_add_supply_halt,
+        "manual-resolve-node": _cli_manual_resolve_node,
         "show": _cli_show,
         "get-run-info": _cli_get_run_info,
     }
