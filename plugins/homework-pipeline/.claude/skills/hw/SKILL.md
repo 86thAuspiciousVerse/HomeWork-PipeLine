@@ -8,13 +8,19 @@ tools: Read, Bash, Edit, Write
 
 你是唯一知道管线全貌的 agent——你读 state.yaml、决定下一步、派 subagent、处理结果、推进管线。Subagent 不知道管线存在，每次派发时你在 task 里传 schema + 上下文。
 
-插件根目录：`C:\Code\HomeWork-PipeLine\plugins\homework-pipeline`。
+插件根目录：Bash 跑以下命令获取 plugin_root，后续所有 `orchestrator_state.py` 调用均以 `<plugin_root>/.homework/orchestrator_state.py` 为入口：
+
+```bash
+python -c "import json; from pathlib import Path; root = Path.home() / '.claude/plugins/cache/homework-dev/homework-pipeline'; versions = sorted([d for d in root.iterdir() if d.is_dir() and (d / '.claude-plugin/plugin.json').exists()], key=lambda d: [int(x) for x in d.name.split('.')], reverse=True); print(json.dumps({'plugin_root': str(versions[0])}))"
+```
+
+取返回的 `plugin_root`。以下所有 `python "<plugin_root>/.homework/orchestrator_state.py"` 均指此路径。
 
 ## 启动
 
 1. Bash 跑 `markitdown "<docx>" -c UTF-8 -o <tmp.md> 2>&1` 把课程文档转 Markdown，Read 它
 2. Bash 调 `python "<plugin_root>/.homework/orchestrator_state.py" create-run "<docx 绝对路径>"`，拿回 `{run_id, run_root, state_path}`
-3. 保存 `run_id`、`run_root`、`state_path`。之后每阶段委托 subagent 时，task 开头注入：
+3. 保存 `run_id`、`run_root`、`state_path`、`plugin_root`。之后每阶段委托 subagent 时，task 开头注入：
 
 ```
 ## 上下文
@@ -45,11 +51,25 @@ run_root: {run_root}
 
 ### P3 SUPPLY_GATE（闸2）
 
-Bash 调 `python orchestrator_state.py classify-breakpoints <run_id> <verifiability_report.yaml>`。纯函数产两档断点并自动回写 state.yaml。sense_default_trade 出生 resolved=true 不停机；supply_halt 出生 resolved=false 且非空 → PAUSED。
+Bash 调 `python orchestrator_state.py classify-breakpoints <run_id> <verifiability_report.yaml>`。纯函数产两档断点并自动回写 state.yaml。sense_default_trade 必须带 default fallback 元数据，出生 resolved=true 不停机；supply_halt 必须带获取步骤、恢复说明、closure、source/provenance ref，出生 resolved=false 且非空 → PAUSED。
 
 ### P4 PLAN_SELECTOR → Agent(plan-selector)
 
-→ `artifacts/plan.yaml`。DAG + 每 node 验收标准（自然语言） + 淘汰理由。被 REJECT 栈标 relaxed_verify，不改 spec。
+→ `artifacts/plan.yaml`。DAG + 每 node 验收标准（自然语言）+ 证据预期 + failure_policy + 来源引用 + 淘汰理由。被 REJECT 栈标 relaxed_verify，不改 spec。
+
+### P4.5 CONTRACT_VALIDATE
+
+Bash 调插件自有校验面，确认 P0-P4 运行时产物满足通用契约，且跨文件引用能闭合：
+
+```bash
+python "<plugin_root>/.homework/artifact_contracts.py" \
+  --spec "<run_root>/artifacts/spec.yaml" \
+  --resource-plan "<run_root>/artifacts/resource_plan.yaml" \
+  --verifiability-report "<run_root>/artifacts/verifiability_report.yaml" \
+  --plan "<run_root>/artifacts/plan.yaml"
+```
+
+若校验失败，不进入 P5；按报错路径回到对应 P0-P4 agent 修正产物。OpenSpec 只描述插件行为，运行时 artifact 契约以插件实现与测试为准。
 
 ### P5 EXECUTOR → Agent(hw-orchestrator)
 
@@ -84,7 +104,7 @@ python orchestrator_state.py manual-resolve-node <run_id> <node_name> <产物路
 
 ### P7 FACTS_DERIVE → Agent(facts-deriver)
 
-从 P5 执行留痕 + P6 审计报告收编 `facts.json`（metrics/artifacts/checklist/provenance）。AI 占比计算扣除 `source=manual` 和 `source=default_trade` 的 node。渲染期路径检查：引用的产物路径不存在→报错挡下。
+从 P5 执行留痕 + P6 审计报告 + `python orchestrator_state.py export-provenance <run_id>` 收编 `facts.json`（metrics/artifacts/checklist/provenance）。AI 占比计算须扣除 `source=manual`、`source=default_trade`、pending supply 和 human-provided 的 node。渲染期路径检查：引用的产物路径不存在→报错挡下。
 
 ### P8 PACKER → Agent(packer)
 
@@ -104,10 +124,10 @@ supply_halt 条目可能从三个阶段产生：P2 裁决器、P5 hw-orchestrato
 
 ```bash
 # P5 或 P6 产出的 supply_halt 条目通过 stdin JSON 传入
-echo '{"id":"...", "stage_id":"...", "trigger":"executor", "kind":"api_key", "why":"...", "obtain_steps":["..."], "when_provided":"..."}' | python orchestrator_state.py add-supply-halt <run_id>
+echo '{"id":"...", "stage_id":"...", "trigger":"executor", "kind":"api_key", "closure":"outside", "has_default":false, "why":"...", "obtain_steps":["..."], "when_provided":"...", "source_ref":"execution/traces/<node>__attempt1.txt"}' | python orchestrator_state.py add-supply-halt <run_id>
 ```
 
-无论来自哪个来源，处理方式相同：**不退出进程、不跨会话、不给假默认值跑**。打印清单，在对话里等人补。用户给了真实值后，Bash 调 `python orchestrator_state.py resolve-supply-halt <run_id> <item_id> <value_ref>`（value_ref 形如 `env:AMAP_API_KEY`）。batch 全 resolved 后 PAUSED→ENTERING 继续。
+无论来自哪个来源，处理方式相同：**不退出进程、不跨会话、不给假默认值跑**。打印清单，在对话里等人补。用户给了真实值后，Bash 调 `python orchestrator_state.py resolve-supply-halt <run_id> <item_id> <value_ref>`（value_ref 形如 `env:SERVICE_API_KEY`，不存密钥明文）。batch 全 resolved 后 PAUSED→ENTERING 继续。
 
 ## 全部 COMPLETED
 

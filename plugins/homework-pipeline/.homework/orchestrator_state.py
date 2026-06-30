@@ -23,7 +23,7 @@ import sys
 import tempfile
 import datetime as _dt
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Mapping, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -109,6 +109,11 @@ PhaseStatus = Literal["ENTERING", "RUNNING", "COMPLETED", "PAUSED"]
 PhaseRecordStatus = Literal["PENDING", "ENTERING", "RUNNING", "COMPLETED", "PAUSED"]
 TriggerKind = Literal["gate2", "executor", "auditor"]
 
+
+class BreakpointValidationError(ValueError):
+    """Raised when a user-facing breakpoint is not complete enough to pause."""
+
+
 # ---------------------------------------------------------------------------
 # 断点子结构（DESIGN.md §11.5.1 breakpoints / §6 / §11.7 P0-4 多源协议）
 # ---------------------------------------------------------------------------
@@ -119,7 +124,8 @@ class SuppliedItem(BaseModel):
 
     id: str
     provided_at: Optional[str] = None     # ISO8601 字符串，未提供时为 null
-    provided_value_ref: Optional[str] = None  # 例 "env:AMAP_API_KEY"，不存明文
+    provided_value_ref: Optional[str] = None  # 例 "env:SERVICE_API_KEY"，不存明文
+    completion_source: str = "human_provided"
 
 
 class SupplyHaltBatchItem(BaseModel):
@@ -140,18 +146,36 @@ class SupplyHaltBatchItem(BaseModel):
     stage_id: str          # 关联的 spec.deliverables[].stages
     trigger: TriggerKind = "gate2"  # gate2 | executor | auditor
     kind: str = "api_key"  # api_key|dataset|account|credential_file|...
+    closure: Optional[str] = None  # 例 inside/outside/manual，来自资源闭包裁决
+    has_default: Optional[bool] = None
     # §6 五项必填中的三项人读字段（id/kind 已在上）：
     why: Optional[str] = None            # 为什么必需（含"裁决已确认无默认值可替且无闭外降级路径"）
     obtain_steps: List[str] = Field(default_factory=list)  # 人读获取步骤
     when_provided: Optional[str] = None  # 补给后续行方式（如"重跑 fetch 阶段即可续行"）
+    source_ref: Optional[str] = None
+    provenance_ref: Optional[str] = None
     resolved: bool = False
     supplied_items: List[SuppliedItem] = Field(default_factory=list)
+
+
+class DefaultTradeMetadata(BaseModel):
+    """Audit metadata for default fallback output that is not real execution evidence."""
+
+    stage_id: str
+    relaxed_requirement: str
+    fallback_reason: str
+    evidence_source: str
+    non_real_output_marker: str
+    source_ref: Optional[str] = None
+    provenance_ref: Optional[str] = None
+    completion_source: str = "default_fallback"
 
 
 class SenseDefaultTrade(BaseModel):
     """感官型断点：给默认产物继续跑（出生 resolved=true，不停机）。"""
 
     batch: List[str] = Field(default_factory=list)  # stage_id 列表（轻量标记）
+    fallbacks: List[DefaultTradeMetadata] = Field(default_factory=list)
     resolved: bool = True
     rationale_ref: Optional[str] = None
     # 例 "artifacts/verifiability_report.yaml#breakpoints_summary.sense_default_trade"
@@ -296,6 +320,7 @@ RetargetBudget.model_rebuild()
 AuditorBudget.model_rebuild()
 SuppliedItem.model_rebuild()
 SupplyHaltBatchItem.model_rebuild()
+DefaultTradeMetadata.model_rebuild()
 SenseDefaultTrade.model_rebuild()
 SupplyHalt.model_rebuild()
 Breakpoints.model_rebuild()
@@ -414,6 +439,207 @@ def _load_verifiability_report(
     return _load_yaml(p)
 
 
+def _text_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    return None
+
+
+def _first_text(
+    item: Mapping[str, Any],
+    keys: tuple[str, ...],
+    path: str,
+    field_name: str,
+    issues: List[str],
+) -> Optional[str]:
+    for key in keys:
+        text = _text_value(item.get(key))
+        if text:
+            return text
+    issues.append(f"{path}: missing required field: {field_name}")
+    return None
+
+
+def _first_source_ref(
+    item: Mapping[str, Any],
+    path: str,
+    issues: List[str],
+) -> tuple[Optional[str], Optional[str]]:
+    source_ref = _text_value(item.get("source_ref"))
+    if source_ref:
+        return source_ref, _text_value(item.get("provenance_ref"))
+
+    source_refs = item.get("source_refs")
+    if isinstance(source_refs, list):
+        for value in source_refs:
+            source_ref = _text_value(value)
+            if source_ref:
+                return source_ref, _text_value(item.get("provenance_ref"))
+
+    provenance_ref = _text_value(item.get("provenance_ref"))
+    if provenance_ref:
+        return None, provenance_ref
+
+    provenance = item.get("provenance")
+    if isinstance(provenance, Mapping):
+        source_ref = _text_value(provenance.get("source_ref"))
+        provenance_ref = _text_value(provenance.get("ref"))
+        if source_ref or provenance_ref:
+            return source_ref, provenance_ref
+
+    issues.append(f"{path}: missing required source_ref or provenance_ref")
+    return None, None
+
+
+def _steps_value(
+    value: Any,
+    path: str,
+    issues: List[str],
+) -> List[str]:
+    if not isinstance(value, list):
+        issues.append(f"{path}: missing required field: obtain_steps")
+        return []
+    steps = [text for step in value if (text := _text_value(step))]
+    if not steps:
+        issues.append(f"{path}: obtain_steps must contain at least one string")
+    return steps
+
+
+def _default_trade_marker(
+    value: Any,
+    path: str,
+    issues: List[str],
+) -> Optional[str]:
+    if isinstance(value, bool):
+        if value:
+            return "not_real_execution_evidence"
+        issues.append(f"{path}: non_real_output_marker must be truthy")
+        return None
+    marker = _text_value(value)
+    if marker:
+        return marker
+    issues.append(f"{path}: missing required field: non_real_output_marker")
+    return None
+
+
+def _validate_value_ref(value_ref: str) -> str:
+    value_ref = value_ref.strip()
+    allowed_prefixes = ("env:", "file:", "path:", "secret:", "vault:", "user_ref:")
+    if not value_ref or not value_ref.startswith(allowed_prefixes):
+        raise BreakpointValidationError(
+            "provided value must be a reference such as env:SERVICE_API_KEY or file:secrets.env"
+        )
+    return value_ref
+
+
+def validate_supply_halt_item(
+    item: Mapping[str, Any] | SupplyHaltBatchItem,
+    *,
+    path: str = "supply_halt",
+) -> SupplyHaltBatchItem:
+    """Validate and normalize a supply_halt entry before it can pause a run."""
+    raw = item.model_dump(mode="json") if isinstance(item, SupplyHaltBatchItem) else dict(item)
+    issues: List[str] = []
+
+    item_id = _first_text(raw, ("id",), path, "id", issues)
+    stage_id = _first_text(raw, ("stage_id",), path, "stage_id", issues)
+    kind = _first_text(raw, ("kind",), path, "kind", issues)
+    trigger = _first_text(raw, ("trigger",), path, "trigger", issues)
+    if trigger and trigger not in ("gate2", "executor", "auditor"):
+        issues.append(f"{path}.trigger: unknown trigger {trigger!r}")
+    closure = _first_text(raw, ("closure", "closure_status"), path, "closure", issues)
+    why = _first_text(raw, ("why", "rationale", "reason"), path, "why", issues)
+    when_provided = _first_text(
+        raw,
+        ("when_provided", "resume_instruction", "resume"),
+        path,
+        "when_provided",
+        issues,
+    )
+    obtain_steps = _steps_value(raw.get("obtain_steps"), path, issues)
+    source_ref, provenance_ref = _first_source_ref(raw, path, issues)
+
+    if issues:
+        raise BreakpointValidationError("\n".join(issues))
+
+    return SupplyHaltBatchItem(
+        id=item_id or "",
+        stage_id=stage_id or "",
+        trigger=trigger,  # type: ignore[arg-type]
+        kind=kind or "",
+        closure=closure,
+        has_default=raw.get("has_default"),
+        why=why,
+        obtain_steps=obtain_steps,
+        when_provided=when_provided,
+        source_ref=source_ref,
+        provenance_ref=provenance_ref,
+        resolved=bool(raw.get("resolved", False)),
+        supplied_items=[
+            SuppliedItem.model_validate(s)
+            for s in raw.get("supplied_items", [])
+            if isinstance(s, Mapping)
+        ],
+    )
+
+
+def validate_default_trade_metadata(
+    item: Mapping[str, Any],
+    *,
+    path: str = "default_trade",
+) -> DefaultTradeMetadata:
+    """Validate default fallback metadata so it cannot look like real output."""
+    raw = dict(item)
+    issues: List[str] = []
+
+    stage_id = _first_text(raw, ("stage_id", "id"), path, "stage_id", issues)
+    relaxed_requirement = _first_text(
+        raw,
+        ("relaxed_requirement", "relaxed_requirement_id", "requirement"),
+        path,
+        "relaxed_requirement",
+        issues,
+    )
+    fallback_reason = _first_text(
+        raw,
+        ("fallback_reason", "reason", "rationale"),
+        path,
+        "fallback_reason",
+        issues,
+    )
+    evidence_source = _first_text(
+        raw,
+        ("evidence_source", "source", "synthetic_evidence_source"),
+        path,
+        "evidence_source",
+        issues,
+    )
+    marker = _default_trade_marker(
+        raw.get("non_real_output_marker", raw.get("not_real_execution_evidence")),
+        path,
+        issues,
+    )
+    source_ref, provenance_ref = _first_source_ref(raw, path, issues)
+
+    if issues:
+        raise BreakpointValidationError("\n".join(issues))
+
+    return DefaultTradeMetadata(
+        stage_id=stage_id or "",
+        relaxed_requirement=relaxed_requirement or "",
+        fallback_reason=fallback_reason or "",
+        evidence_source=evidence_source or "",
+        non_real_output_marker=marker or "",
+        source_ref=source_ref,
+        provenance_ref=provenance_ref,
+    )
+
+
 def classify_breakpoints(verifiability_report) -> Dict[str, Any]:
     """闸2 纯函数（§11.5 P0-1 方案A）。
 
@@ -433,50 +659,44 @@ def classify_breakpoints(verifiability_report) -> Dict[str, Any]:
     report = _load_verifiability_report(verifiability_report)
     summary = report.get("breakpoints_summary") or {}
 
-    # sense_default_trade：设计稿示例里为 stage_id 字符串列表。
+    # sense_default_trade：必须带 fallback provenance，batch 仅保留兼容用 stage_id 列表。
     sdt_raw = summary.get("sense_default_trade") or []
-    sdt_batch = [s if isinstance(s, str) else str(s.get("stage_id", s)) for s in sdt_raw]
+    sdt_batch: List[str] = []
+    sdt_fallbacks: List[DefaultTradeMetadata] = []
+    for index, item in enumerate(sdt_raw):
+        if not isinstance(item, dict):
+            raise BreakpointValidationError(
+                "breakpoints_summary.sense_default_trade"
+                f"[{index}]: default_trade entries must be mappings with fallback metadata"
+            )
+        metadata = validate_default_trade_metadata(
+            item,
+            path=f"breakpoints_summary.sense_default_trade[{index}]",
+        )
+        sdt_batch.append(metadata.stage_id)
+        sdt_fallbacks.append(metadata)
 
     # supply_halt：每条携带 stage_id + closure + has_default（折叠自 Resource Planner）。
     sh_raw = summary.get("supply_halt") or []
     sh_batch: List[SupplyHaltBatchItem] = []
-    for item in sh_raw:
+    for index, item in enumerate(sh_raw):
         if not isinstance(item, dict):
-            continue
-        stage_id = item.get("stage_id") or item.get("id") or "unknown"
-        item_id = item.get("id") or stage_id
-        kind = item.get("kind") or "api_key"
-        # 默认 trigger=gate2（本函数为闸2入口产出的批次）。
-        trigger = item.get("trigger", "gate2")
-        if trigger not in ("gate2", "executor", "auditor"):
-            trigger = "gate2"
-        # §6 五项：why 取裁决器折叠记录里的 rationale（若裁决器给了 reasoning 饰）；
-        # obtain_steps/when_provided 在闸2纯函数层不可得（要求只读 verifiability_report，
-        # 不回读 resource_plan），留空由后续 executor/auditor 追加同 id item 时补齐，
-        # 或由主 agent 在打印待补给清单时从 resource_plan 映射补充。
-        why = item.get("rationale") or item.get("why")
+            raise BreakpointValidationError(
+                f"breakpoints_summary.supply_halt[{index}]: entry must be a mapping"
+            )
+        payload = dict(item)
+        payload.setdefault("trigger", "gate2")
+        payload.setdefault("resolved", False)
         sh_batch.append(
-            SupplyHaltBatchItem(
-                id=str(item_id),
-                stage_id=str(stage_id),
-                trigger=trigger,  # type: ignore[arg-type]
-                kind=str(kind),
-                why=str(why) if why is not None else None,
-                obtain_steps=[
-                    str(s) for s in item.get("obtain_steps", []) if isinstance(s, str)
-                ],
-                when_provided=(
-                    str(item["when_provided"])
-                    if isinstance(item.get("when_provided"), str)
-                    else None
-                ),
-                resolved=False,
-                supplied_items=[],
+            validate_supply_halt_item(
+                payload,
+                path=f"breakpoints_summary.supply_halt[{index}]",
             )
         )
 
     sense_default_trade = SenseDefaultTrade(
         batch=sdt_batch,
+        fallbacks=sdt_fallbacks,
         resolved=True,  # 出生 resolved=true，不停机
         rationale_ref="artifacts/verifiability_report.yaml#breakpoints_summary.sense_default_trade",
     )
@@ -585,9 +805,10 @@ def mark_entering(state: RunState, phase: str) -> RunState:
 def resolve_supply_halt(state: RunState, item_id: str, value_ref: str) -> RunState:
     """辅助：用户在对话中提供了某 supply_halt item 的真实值后调用（§11.5.1）。
 
-    value_ref 例 "env:AMAP_API_KEY"，不存明文。当 batch 全 resolved 后，
+    value_ref 例 "env:SERVICE_API_KEY"，不存明文。当 batch 全 resolved 后，
     supply_halt.resolved 翻 true、phase_status 由 PAUSED 回 ENTERING 继续推进。
     """
+    value_ref = _validate_value_ref(value_ref)
     batch = state.breakpoints.supply_halt.batch
     now_iso = _dt.datetime.now().isoformat()
     resolved_any = False
@@ -627,22 +848,33 @@ def add_supply_halt_item(
     why: str,
     obtain_steps: List[str],
     when_provided: str,
+    closure: str,
+    source_ref: str,
+    has_default: Optional[bool] = None,
+    provenance_ref: Optional[str] = None,
 ) -> RunState:
     """P5 执行器或 P6 auditor 发现新 supply_halt 时调用，追加写入 state.yaml。
 
     与 P2→P3 自动写入不同，P5/P6 产出的 supply_halt 需要主 agent 显式调用此函数。
     追加后 batch 非空 → phase_status=PAUSED，等用户补给。
     """
-    item = SupplyHaltBatchItem(
-        id=id,
-        stage_id=stage_id,
-        trigger=trigger,
-        kind=kind,
-        why=why,
-        obtain_steps=obtain_steps,
-        when_provided=when_provided,
-        resolved=False,
-        supplied_items=[],
+    item = validate_supply_halt_item(
+        {
+            "id": id,
+            "stage_id": stage_id,
+            "trigger": trigger,
+            "kind": kind,
+            "closure": closure,
+            "has_default": has_default,
+            "why": why,
+            "obtain_steps": obtain_steps,
+            "when_provided": when_provided,
+            "source_ref": source_ref,
+            "provenance_ref": provenance_ref,
+            "resolved": False,
+            "supplied_items": [],
+        },
+        path="add_supply_halt_item",
     )
     state.breakpoints.supply_halt.batch.append(item)
     state.breakpoints.supply_halt.resolved = False
@@ -681,6 +913,93 @@ def manual_resolve_node(
     })
     _persist(state)
     return state
+
+
+def build_audit_provenance(state: RunState) -> Dict[str, Any]:
+    """Build a compact provenance view for facts/packer without exposing secrets."""
+    default_fallbacks = [
+        {
+            "stage_id": item.stage_id,
+            "completion_source": item.completion_source,
+            "relaxed_requirement": item.relaxed_requirement,
+            "fallback_reason": item.fallback_reason,
+            "evidence_source": item.evidence_source,
+            "non_real_output_marker": item.non_real_output_marker,
+            "source_ref": item.source_ref,
+            "provenance_ref": item.provenance_ref,
+            "real_execution_evidence": False,
+        }
+        for item in state.breakpoints.sense_default_trade.fallbacks
+    ]
+
+    human_supplied: List[Dict[str, Any]] = []
+    pending_supply: List[Dict[str, Any]] = []
+    for item in state.breakpoints.supply_halt.batch:
+        base = {
+            "id": item.id,
+            "stage_id": item.stage_id,
+            "kind": item.kind,
+            "trigger": item.trigger,
+            "closure": item.closure,
+            "source_ref": item.source_ref,
+            "provenance_ref": item.provenance_ref,
+        }
+        if item.resolved:
+            for supplied in item.supplied_items:
+                human_supplied.append(
+                    {
+                        **base,
+                        "completion_source": supplied.completion_source,
+                        "provided_at": supplied.provided_at,
+                        "provided_value_ref": supplied.provided_value_ref,
+                    }
+                )
+        else:
+            pending_supply.append(
+                {
+                    **base,
+                    "completion_source": "pending_supply",
+                    "why": item.why,
+                    "obtain_steps": item.obtain_steps,
+                    "when_provided": item.when_provided,
+                }
+            )
+
+    manual_nodes: List[Dict[str, Any]] = []
+    executor = state.phases.get("EXECUTOR")
+    if executor and executor.manual_nodes:
+        for node in executor.manual_nodes:
+            manual_nodes.append(
+                {
+                    "node": node.get("node"),
+                    "completion_source": "manually_completed",
+                    "source": node.get("source"),
+                    "resolved_at": node.get("resolved_at"),
+                }
+            )
+
+    unresolved_work = [
+        {
+            "phase": phase,
+            "completion_source": "unresolved_work",
+            "status": rec.status,
+        }
+        for phase, rec in state.phases.items()
+        if rec.status not in ("COMPLETED",)
+    ]
+
+    return {
+        "run_id": state.run_id,
+        "completion_sources": {
+            "ai_executed": [],
+            "language_equivalent": [],
+            "default_fallback": default_fallbacks,
+            "human_provided": human_supplied,
+            "pending_supply": pending_supply,
+            "manually_completed": manual_nodes,
+            "unresolved_work": unresolved_work,
+        },
+    }
 
 
 def _next_pending_phase(state: RunState) -> str:
@@ -781,7 +1100,7 @@ def _cli_get_run_info(args: List[str]) -> int:
 def _cli_resolve_supply_halt(args: List[str]) -> int:
     """CLI: 用户提供了某 supply_halt item 的真实值后调用，逐条 resolve。
     用法: resolve-supply-halt <run_id> <item_id> <value_ref>
-    value_ref 形如 env:AMAP_API_KEY，不存明文。"""
+    value_ref 形如 env:SERVICE_API_KEY，不存明文。"""
     if len(args) < 3:
         print("用法: resolve-supply-halt <run_id> <item_id> <value_ref>", file=sys.stderr)
         return 2
@@ -817,8 +1136,26 @@ def _cli_add_supply_halt(args: List[str]) -> int:
         why=str(item.get("why", "")),
         obtain_steps=[str(s) for s in item.get("obtain_steps", [])],
         when_provided=str(item.get("when_provided", "")),
+        closure=str(item.get("closure", "")),
+        has_default=item.get("has_default"),
+        source_ref=str(item.get("source_ref", "")),
+        provenance_ref=(
+            str(item["provenance_ref"])
+            if item.get("provenance_ref") is not None
+            else None
+        ),
     )
     print(json.dumps(_state_summary(state), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cli_export_provenance(args: List[str]) -> int:
+    """CLI: 输出供 P7/P8 收编的 provenance 摘要。"""
+    if not args:
+        print("用法: export-provenance <run_id>", file=sys.stderr)
+        return 2
+    state = _load_state(args[0])
+    print(json.dumps(build_audit_provenance(state), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -850,11 +1187,23 @@ def _state_summary(state: RunState) -> Dict[str, Any]:
         "breakpoints": {
             "sense_default_trade": {
                 "batch": state.breakpoints.sense_default_trade.batch,
+                "fallbacks": [
+                    item.model_dump(mode="json")
+                    for item in state.breakpoints.sense_default_trade.fallbacks
+                ],
                 "resolved": state.breakpoints.sense_default_trade.resolved,
             },
             "supply_halt": {
                 "batch": [
-                    {"id": b.id, "kind": b.kind, "trigger": b.trigger, "resolved": b.resolved}
+                    {
+                        "id": b.id,
+                        "kind": b.kind,
+                        "trigger": b.trigger,
+                        "closure": b.closure,
+                        "source_ref": b.source_ref,
+                        "provenance_ref": b.provenance_ref,
+                        "resolved": b.resolved,
+                    }
                     for b in state.breakpoints.supply_halt.batch
                 ],
                 "resolved": state.breakpoints.supply_halt.resolved,
@@ -871,7 +1220,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not argv:
         print(
             "用法: python orchestrator_state.py "
-            "{create-run|mark-entering|classify-breakpoints|commit-phase|resolve-supply-halt|add-supply-halt|manual-resolve-node|show|get-run-info} ...",
+            "{create-run|mark-entering|classify-breakpoints|commit-phase|resolve-supply-halt|add-supply-halt|export-provenance|manual-resolve-node|show|get-run-info} ...",
             file=sys.stderr,
         )
         return 2
@@ -883,6 +1232,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "commit-phase": _cli_commit_phase,
         "resolve-supply-halt": _cli_resolve_supply_halt,
         "add-supply-halt": _cli_add_supply_halt,
+        "export-provenance": _cli_export_provenance,
         "manual-resolve-node": _cli_manual_resolve_node,
         "show": _cli_show,
         "get-run-info": _cli_get_run_info,
