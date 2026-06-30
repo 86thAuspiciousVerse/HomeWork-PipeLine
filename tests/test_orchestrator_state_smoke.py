@@ -43,6 +43,30 @@ class OrchestratorStateSmokeTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             return self.module.main(argv)
 
+    def _complete_default_trade_item(self):
+        return {
+            "stage_id": "visual-report",
+            "relaxed_requirement": "production visual polish",
+            "fallback_reason": "default visual output is acceptable only as approximate",
+            "evidence_source": "verifiability_report.yaml#stage_records.0",
+            "non_real_output_marker": "approximate_fallback_not_measured",
+            "source_ref": "verifiability_report.yaml#breakpoints_summary.sense_default_trade.0",
+        }
+
+    def _complete_supply_halt_item(self):
+        return {
+            "id": "service-key",
+            "stage_id": "fetch-transit",
+            "kind": "api_key",
+            "trigger": "gate2",
+            "closure": "outside",
+            "has_default": False,
+            "rationale": "need real API access",
+            "obtain_steps": ["apply key"],
+            "when_provided": "rerun fetch stage",
+            "source_ref": "resource_plan.yaml#resources.0",
+        }
+
     def test_smoke_create_classify_commit_happy_path(self):
         doc_path = self._create_doc()
 
@@ -61,7 +85,7 @@ class OrchestratorStateSmokeTests(unittest.TestCase):
         self.module._dump_yaml(
             {
                 "breakpoints_summary": {
-                    "sense_default_trade": ["visual-report"],
+                    "sense_default_trade": [self._complete_default_trade_item()],
                     "supply_halt": [],
                 }
             },
@@ -78,7 +102,22 @@ class OrchestratorStateSmokeTests(unittest.TestCase):
             classified_state["breakpoints"]["sense_default_trade"]["batch"],
             ["visual-report"],
         )
+        self.assertEqual(
+            classified_state["breakpoints"]["sense_default_trade"]["fallbacks"][0][
+                "non_real_output_marker"
+            ],
+            "approximate_fallback_not_measured",
+        )
         self.assertTrue(classified_state["breakpoints"]["supply_halt"]["resolved"])
+
+        provenance = self.module.build_audit_provenance(
+            self.module._load_state(run_id)
+        )
+        self.assertFalse(
+            provenance["completion_sources"]["default_fallback"][0][
+                "real_execution_evidence"
+            ]
+        )
 
         commit_exit = self._run_main(
             ["commit-phase", run_id, "SPEC_EXTRACT", "artifacts/spec.yaml"]
@@ -106,16 +145,7 @@ class OrchestratorStateSmokeTests(unittest.TestCase):
             {
                 "breakpoints_summary": {
                     "sense_default_trade": [],
-                    "supply_halt": [
-                        {
-                            "id": "amap-key",
-                            "stage_id": "fetch-transit",
-                            "kind": "api_key",
-                            "rationale": "need real API access",
-                            "obtain_steps": ["apply key"],
-                            "when_provided": "rerun fetch stage",
-                        }
-                    ],
+                    "supply_halt": [self._complete_supply_halt_item()],
                 }
             },
             report_path,
@@ -132,7 +162,7 @@ class OrchestratorStateSmokeTests(unittest.TestCase):
         self.assertFalse(paused_state["breakpoints"]["supply_halt"]["resolved"])
         self.assertEqual(
             paused_state["breakpoints"]["supply_halt"]["batch"][0]["id"],
-            "amap-key",
+            "service-key",
         )
 
         state = self.module._load_state(run_id)
@@ -141,6 +171,110 @@ class OrchestratorStateSmokeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "PAUSED"):
             self._run_main(["commit-phase", run_id, "SPEC_EXTRACT", "artifacts/spec.yaml"])
+
+    def test_rejects_incomplete_supply_halt_before_pause(self):
+        doc_path = self._create_doc()
+        self.assertEqual(self._run_main(["create-run", str(doc_path)]), 0)
+
+        state_path = self._state_path()
+        run_id = self.module._load_yaml(state_path)["run_id"]
+
+        item = self._complete_supply_halt_item()
+        del item["obtain_steps"]
+        report_path = Path(self.temp_dir.name) / "verifiability_report.yaml"
+        self.module._dump_yaml(
+            {
+                "breakpoints_summary": {
+                    "sense_default_trade": [],
+                    "supply_halt": [item],
+                }
+            },
+            report_path,
+        )
+
+        with self.assertRaisesRegex(self.module.BreakpointValidationError, "obtain_steps"):
+            self._run_main(["classify-breakpoints", run_id, str(report_path)])
+
+        state = self.module._load_yaml(state_path)
+        self.assertEqual(state["phase_status"], "ENTERING")
+        self.assertEqual(state["breakpoints"]["supply_halt"]["batch"], [])
+
+    def test_add_supply_halt_item_validates_late_items(self):
+        doc_path = self._create_doc()
+        self.assertEqual(self._run_main(["create-run", str(doc_path)]), 0)
+        state = self.module._load_state(self.module._load_yaml(self._state_path())["run_id"])
+
+        with self.assertRaisesRegex(self.module.BreakpointValidationError, "source_ref"):
+            self.module.add_supply_halt_item(
+                state,
+                id="late-api-key",
+                stage_id="fetch-live-data",
+                kind="api_key",
+                trigger="executor",
+                why="live data requires a user-owned credential",
+                obtain_steps=["create the API key"],
+                when_provided="rerun fetch-live-data",
+                closure="outside",
+                source_ref="",
+            )
+
+        updated = self.module.add_supply_halt_item(
+            state,
+            id="late-api-key",
+            stage_id="fetch-live-data",
+            kind="api_key",
+            trigger="executor",
+            why="live data requires a user-owned credential",
+            obtain_steps=["create the API key"],
+            when_provided="rerun fetch-live-data",
+            closure="outside",
+            has_default=False,
+            source_ref="execution/traces/fetch-live-data__attempt1.txt",
+        )
+
+        self.assertEqual(updated.phase_status, "PAUSED")
+        self.assertEqual(
+            updated.breakpoints.supply_halt.batch[0].source_ref,
+            "execution/traces/fetch-live-data__attempt1.txt",
+        )
+
+    def test_resolve_supply_halt_records_value_reference_only(self):
+        doc_path = self._create_doc()
+        self.assertEqual(self._run_main(["create-run", str(doc_path)]), 0)
+
+        state_path = self._state_path()
+        run_id = self.module._load_yaml(state_path)["run_id"]
+        report_path = Path(self.temp_dir.name) / "verifiability_report.yaml"
+        self.module._dump_yaml(
+            {
+                "breakpoints_summary": {
+                    "sense_default_trade": [],
+                    "supply_halt": [self._complete_supply_halt_item()],
+                }
+            },
+            report_path,
+        )
+        self.assertEqual(
+            self._run_main(["classify-breakpoints", run_id, str(report_path)]),
+            0,
+        )
+
+        state = self.module._load_state(run_id)
+        with self.assertRaisesRegex(self.module.BreakpointValidationError, "reference"):
+            self.module.resolve_supply_halt(state, "service-key", "actual-secret-value")
+
+        state = self.module.resolve_supply_halt(state, "service-key", "env:SERVICE_API_KEY")
+        supplied = state.breakpoints.supply_halt.batch[0].supplied_items[0]
+        self.assertEqual(supplied.provided_value_ref, "env:SERVICE_API_KEY")
+        self.assertEqual(supplied.completion_source, "human_provided")
+
+        provenance = self.module.build_audit_provenance(state)
+        self.assertEqual(
+            provenance["completion_sources"]["human_provided"][0][
+                "provided_value_ref"
+            ],
+            "env:SERVICE_API_KEY",
+        )
 
 
 if __name__ == "__main__":

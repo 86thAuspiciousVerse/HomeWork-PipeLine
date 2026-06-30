@@ -1,0 +1,18 @@
+fixture: air-quality
+description: Semantic expectations for the local air-quality forecasting fixture.
+required_text:
+  - ["按时间顺序", "70/15/15"]
+  - ["未来 24-72 小时", "PM2.5", "AQI"]
+required_resource_closures:
+  - kind: dataset
+    closure: inside
+forbidden_supply_halt_kinds:
+  - api_key
+required_deliverable_paths:
+  - output/dashboard.html
+  - code/app.py
+  - requirements.txt
+required_traceable_artifact_paths:
+  - output/dashboard.html
+  - code/app.py
+  - requirements.txt

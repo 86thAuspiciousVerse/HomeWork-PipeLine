@@ -50,11 +50,13 @@ delivery/<course>/
 ## 不汇入
 
 - 大原始数据可脚本下载者：只留 `download_data.py` + `data/README.md`
-- 含真实密钥的文件：先占位化——`AMAP_API_KEY = "e80a..."` → `os.environ.get("AMAP_API_KEY", "<见 REPRODUCE.md>")`。替换键集取自 state.yaml breakpoints.supply_halt.batch[] 中 `kind=api_key` 的 id
+- 含真实密钥的文件：先占位化——`SERVICE_API_KEY = "secret..."` → `os.environ.get("SERVICE_API_KEY", "<见 REPRODUCE.md>")`。替换键集取自 state.yaml breakpoints.supply_halt.batch[] 中 `kind=api_key` 的 id
 
 ## PROVENANCE.yaml（学术诚信标注）
 
-每 deliverable 记 `origin: ai_generated | ai_generated_default_trade | human_supplied | human_revised`。来源标注从 facts.json 的 provenance 收编。
+每 deliverable 记 `origin: ai_generated | ai_generated_default_trade | human_supplied | human_revised | pending_supply | manually_completed`。来源标注从 facts.json 的 provenance 收编。
+
+`origin: ai_generated_default_trade` 的条目必须保留 `relaxed_requirement`、`fallback_reason`、`evidence_source`、`non_real_output_marker`，并写明 `real_execution_evidence: false`；不得在 README_FIRST、PROVENANCE 或清单里把默认 fallback 写成实测分析结果。
 
 ## REPRODUCE.md
 

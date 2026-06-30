@@ -1,0 +1,21 @@
+fixture: transit-network
+description: Semantic expectations for the Amap transit-network fixture.
+required_text:
+  - ["高德", "API Key"]
+  - ["CSV", "GEXF", "HTML"]
+required_resource_closures:
+  - kind: api_key
+    closure: outside
+required_supply_halts:
+  - kind: api_key
+    closure: outside
+    source_ref_required: true
+    obtain_steps_required: true
+required_deliverable_paths:
+  - output/routes.csv
+  - output/network.gexf
+  - output/transit_map.html
+required_traceable_artifact_paths:
+  - output/routes.csv
+  - output/network.gexf
+  - output/transit_map.html
