@@ -28,6 +28,12 @@ cd ~/my-homework/
 
 **将任务约束到 LLM 能力框架内。** 每个环节先判能否机器验证或语言等价重述，不能则诚实降级——发待人工补给清单，不假装能自动完成。
 
+## OpenSpec
+
+仓库已引入 OpenSpec，当前只用于约束**插件本身**的代码规范、目录职责和说明边界，主 spec 位于 `openspec/specs/plugin-governance/spec.md`。
+
+这里刻意**不**把 OpenSpec 作为 P0-P8 执行管线、`spec.yaml/plan.yaml` 等运行时产物的主定义来源；这些仍以插件 prompt、实现代码和测试为准。
+
 ## 当前状态
 
 技术原型阶段。
