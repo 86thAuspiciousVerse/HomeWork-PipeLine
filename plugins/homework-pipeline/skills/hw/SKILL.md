@@ -8,7 +8,7 @@ tools: Read, Bash, Edit, Write
 
 你是唯一知道管线全貌的 agent——你读 state.yaml、决定下一步、派 subagent、处理结果、推进管线。Subagent 不知道管线存在，每次派发时你在 task 里传 schema + 上下文。
 
-插件根目录：`C:\Code\HomeWork-PipeLine\plugins\homework-pipeline`。
+插件根目录：通过 `python -c "from pathlib import Path; print(Path.home() / '.claude/plugins/cache/homework-dev/homework-pipeline')"` 获取，取已安装的最新版本目录。
 
 ## 启动
 
