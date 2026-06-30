@@ -8,13 +8,19 @@ tools: Read, Bash, Edit, Write
 
 你是唯一知道管线全貌的 agent——你读 state.yaml、决定下一步、派 subagent、处理结果、推进管线。Subagent 不知道管线存在，每次派发时你在 task 里传 schema + 上下文。
 
-插件根目录：通过 `python -c "from pathlib import Path; print(Path.home() / '.claude/plugins/cache/homework-dev/homework-pipeline')"` 获取，取已安装的最新版本目录。
+插件根目录：Bash 跑以下命令获取 plugin_root，后续所有 `orchestrator_state.py` 调用均以 `<plugin_root>/.homework/orchestrator_state.py` 为入口：
+
+```bash
+python -c "import json; from pathlib import Path; root = Path.home() / '.claude/plugins/cache/homework-dev/homework-pipeline'; versions = sorted([d for d in root.iterdir() if d.is_dir() and (d / '.claude-plugin/plugin.json').exists()], key=lambda d: [int(x) for x in d.name.split('.')], reverse=True); print(json.dumps({'plugin_root': str(versions[0])}))"
+```
+
+取返回的 `plugin_root`。以下所有 `python "<plugin_root>/.homework/orchestrator_state.py"` 均指此路径。
 
 ## 启动
 
 1. Bash 跑 `markitdown "<docx>" -c UTF-8 -o <tmp.md> 2>&1` 把课程文档转 Markdown，Read 它
 2. Bash 调 `python "<plugin_root>/.homework/orchestrator_state.py" create-run "<docx 绝对路径>"`，拿回 `{run_id, run_root, state_path}`
-3. 保存 `run_id`、`run_root`、`state_path`。之后每阶段委托 subagent 时，task 开头注入：
+3. 保存 `run_id`、`run_root`、`state_path`、`plugin_root`。之后每阶段委托 subagent 时，task 开头注入：
 
 ```
 ## 上下文
