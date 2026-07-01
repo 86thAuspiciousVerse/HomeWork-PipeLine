@@ -248,8 +248,9 @@ def _validate_resource_plan(
         if stage_id and stage_id not in stage_ids:
             _add(issues, f"{path}.stage_id", f"unknown stage_id {stage_id!r}")
         _require_non_empty(resource, ("kind", "type"), path, issues)
-        closure = _require_non_empty(resource, ("closure",), path, issues)
-        _require_non_empty(resource, ("why", "rationale"), path, issues)
+        acquisition = _mapping(resource.get("acquisition")) or {}
+        closure = _require_non_empty(resource, ("closure",), path, issues, fallback_mapping=acquisition)
+        _require_non_empty(resource, ("why", "rationale"), path, issues, fallback_mapping=acquisition)
         _require_non_empty(resource, ("source_refs", "source_ref"), path, issues)
 
         human_supply = _mapping(resource.get("human_supply")) or _mapping(
@@ -274,12 +275,15 @@ def _validate_resource_plan(
                 _add(issues, f"resource_plan.constants[{index}]", "must be a mapping")
                 continue
             constraint_id = _string(item_map.get("for_constraint"))
-            if constraint_id and constraint_id not in constraint_ids:
-                _add(
-                    issues,
-                    f"resource_plan.constants[{index}].for_constraint",
-                    f"unknown constraint id {constraint_id!r}",
-                )
+            if constraint_id:
+                for single_id in constraint_id.split(";"):
+                    single_id = single_id.strip()
+                    if single_id and single_id not in constraint_ids:
+                        _add(
+                            issues,
+                            f"resource_plan.constants[{index}].for_constraint",
+                            f"unknown constraint id {single_id!r}",
+                        )
 
     if not resource_ids:
         _add(issues, "resource_plan.resources", "no stable resource ids found")
@@ -295,6 +299,7 @@ def _validate_verifiability_report(
         (
             "stage_records",
             "stage_verifications",
+            "verifications",
             "verifiability",
             "records",
             "stages",

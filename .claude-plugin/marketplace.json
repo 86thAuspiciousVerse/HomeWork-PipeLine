@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "homework-pipeline",
-      "version": "0.4.0",
+      "version": "0.4.6",
       "description": "可验证性治理的全自动产物管线——输入任务要求文档，全自动产出可交付产物（含代码、环境、产物、文档、执行留痕）",
       "source": "./plugins/homework-pipeline",
       "category": "learning"
