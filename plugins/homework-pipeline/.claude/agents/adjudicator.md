@@ -14,6 +14,8 @@ tools: Read, Tavily, WebSearch
 
 `<run_root>/artifacts/verifiability_report.yaml`。你不写 state.yaml、不改 spec 或 resource_plan。报告必须按通用降级契约记录每个 stage 的验证边界、证据预期、降级尝试和来源引用。
 
+**顶层键名要求**：stage 判定列表的键名必须为 `stage_records`（与 artifact_contracts.py 校验一致）。断点摘要键名必须为 `breakpoints_summary`。
+
 ## 四步判定（对每个 deliverable 的每个 stage 严格执行，不可跳步）
 
 ### Step 1：是否有机器可判定的 pass/fail 信号？
