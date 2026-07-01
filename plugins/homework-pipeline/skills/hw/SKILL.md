@@ -106,9 +106,55 @@ python orchestrator_state.py manual-resolve-node <run_id> <node_name> <产物路
 
 从 P5 执行留痕 + P6 审计报告 + `python orchestrator_state.py export-provenance <run_id>` 收编 `facts.json`（metrics/artifacts/checklist/provenance）。AI 占比计算须扣除 `source=manual`、`source=default_trade`、pending supply 和 human-provided 的 node。渲染期路径检查：引用的产物路径不存在→报错挡下。
 
-### P8 PACKER → Agent(packer)
+### P8 PACKER → 主 agent 自己做
 
-汇入 `delivery/<course>/`（代码+文档+留痕+PROVENANCE/REPRODUCE/README_FIRST）。venv 默认 `freeze` 模式（只拷贝 requirements.txt + Python 版本声明），主 agent 可在委托时传 `venv_mode: copy` 覆盖。对齐核对缺即挡下。不打 zip。
+P8 全是确定性机械操作（拷贝、checksum、模板填充、集合差运算），不派 subagent。主 agent 按以下步骤执行：
+
+**1. 准备** — 从 `spec.yaml` 取 `course.name` 作 `<course>`；读 `facts.json` 取 artifacts 清单 + provenance。Bash 建目录：
+```bash
+New-Item -ItemType Directory -Force -Path "<run_root>/delivery/<course>/code"
+New-Item -ItemType Directory -Force -Path "<run_root>/delivery/<course>/data"
+New-Item -ItemType Directory -Force -Path "<run_root>/delivery/<course>/doc"
+New-Item -ItemType Directory -Force -Path "<run_root>/delivery/<course>/traces"
+New-Item -ItemType Directory -Force -Path "<run_root>/delivery/<course>/_meta"
+```
+
+**2. 拷贝产物** — `code/`、`execution/traces/`、`data/`（如有）入 delivery。四件契约快照 + `python --version` 入 `_meta/`：
+```bash
+robocopy "<run_root>/code" "<run_root>/delivery/<course>/code" /E /NFL /NDL
+robocopy "<run_root>/execution/traces" "<run_root>/delivery/<course>/traces" /E /NFL /NDL
+Copy-Item "<run_root>/artifacts/spec.yaml" -Destination "<run_root>/delivery/<course>/_meta/"
+Copy-Item "<run_root>/artifacts/resource_plan.yaml" -Destination "<run_root>/delivery/<course>/_meta/"
+Copy-Item "<run_root>/artifacts/verifiability_report.yaml" -Destination "<run_root>/delivery/<course>/_meta/"
+Copy-Item "<run_root>/artifacts/plan.yaml" -Destination "<run_root>/delivery/<course>/_meta/"
+python --version > "<run_root>/delivery/<course>/_meta/python_version.txt"
+```
+
+**3. checksums** — 对 delivery code 目录生成 SHA256：
+```bash
+Get-ChildItem -Path "<run_root>/delivery/<course>/code" -Recurse -File | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path.Replace('<run_root>/delivery/<course>/', ''))" } > "<run_root>/delivery/<course>/_meta/checksums.sha256"
+```
+
+**4. 密钥占位化** — 若 state.yaml `supply_halt.batch[]` 有 `kind=api_key` 的项，在 delivery code 中将真实密钥替换为 `os.environ.get("KEY_NAME")`。
+
+**5. Write 生成交付文档** — 基于 facts.json 数据 Write 三个文件：
+- `delivery/<course>/README_FIRST.md`：环境要求 + Python 版本 + 一键运行命令
+- `delivery/<course>/PROVENANCE.yaml`：每 deliverable 的 `origin` 标注（从 facts.provenance 收编）；`origin: ai_generated_default_trade` 项保留 `relaxed_requirement` / `fallback_reason` / `non_real_output_marker`，标 `real_execution_evidence: false`
+- `delivery/<course>/REPRODUCE.md`：`pip install -r requirements.txt && python main.py` + 数据获取步骤 + 环境变量清单（只写变量名）
+
+**6. 文档产物拷贝** — P7 渲染的 README.md / 实验报告.md / 答辩稿.md 入 `doc/`。
+
+**7. 对齐核对** — Read facts.json + spec.yaml，逐项比对 `spec.deliverables` vs `facts.artifacts`：
+- 缺失且 supply_halt 已 resolved → 标 pending_supply，不报错
+- 缺失且非 supply_halt → 写 `_meta/deliverable_gaps.yaml`，不标 COMPLETED
+- 全对齐 → 标 COMPLETED
+
+**8. 提交阶段**：
+```bash
+python "<plugin_root>/.homework/orchestrator_state.py" commit-phase <run_id> PACKER "delivery/<course>/"
+```
+
+向用户打印 `delivery/<course>/` 路径。
 
 ## supply_halt 多源合并
 
